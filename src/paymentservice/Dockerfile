@@ -1,81 +1,45 @@
-# ─── STAGE 0: BASE ─────────────────────────────────────────────────────────────
-# Naming a base stage is a Python-specific pattern you'll see here.
-# WHY: Both builder and final stage share the same base image.
-# Instead of writing the full FROM line twice (and risking them drifting apart),
-# you define it ONCE and both stages inherit from "base".
-# This guarantees builder and runtime use the exact same Python version.
-ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM python:3.14.4-alpine@sha256:dd4d2bd5b53d9b25a51da13addf2be586beebd5387e289e798e4083d94ca837a AS base
-
-
-# ─── STAGE 1: BUILDER ──────────────────────────────────────────────────────────
-FROM base AS builder
-
-# PYTHONDONTWRITEBYTECODE=1 → stops Python from creating .pyc cache files
-# (the __pycache__ folders you see in Python projects)
-# Not needed in a container — they'd just bloat the image with no benefit.
+# Copyright 2020 Google LLC
 #
-# PYTHONUNBUFFERED=1 → forces Python's stdout/stderr to flush immediately.
-# WHY this matters in containers: by default Python buffers output, so if your
-# container crashes, the last few log lines might never get written.
-# With this set, logs appear in real-time → critical for debugging in K8s.
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# g++         → C++ compiler, needed to compile native extensions in some pip packages
-# linux-headers → kernel header files, required by packages that interface with
-#                 low-level system calls (e.g., grpcio compiles C extensions)
-# Similar to Node's stage 1 — build tools needed to INSTALL packages, but not to RUN them.
-# rm -rf /var/cache/apk/* → manually clean apk cache (Alpine's apk doesn't have --no-cache
-# when using `apk update` separately, so we clean manually to keep layer small)
-RUN apk update \
-    && apk add --no-cache g++ linux-headers \
-    && rm -rf /var/cache/apk/*
+# Define a default value so it's not empty if the builder fails to provide it
+ARG BUILDPLATFORM=linux/amd64
 
-# Same layer caching pattern — copy dependency manifest first, install, then copy source.
-# requirements.txt is Python's equivalent of package.json
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-# pip installs packages into /usr/local/lib/python3.14/site-packages/
-# We'll cherry-pick just this folder in the final stage — leaving g++ and linux-headers behind.
+FROM --platform=$BUILDPLATFORM node:20.20.2-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
 
+# Some packages (e.g. @google-cloud/profiler) require additional
+# deps for post-install scripts
+RUN apk add --update --no-cache \
+    python3 \
+    make \
+    g++
 
-# ─── STAGE 2: FINAL / RUNTIME IMAGE ───────────────────────────────────────────
-# Back to "base" (the alpine python image) — NOT builder.
-# So this stage has Python but none of the build tools (g++, linux-headers).
-FROM base
+WORKDIR /usr/src/app
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+COPY package*.json ./
 
-# This service can send traces/profiles to Google Cloud Profiler.
-# Setting this to 1 enables that. Safe to ignore for local runs —
-# it'll just fail silently if GCP credentials aren't present.
-ENV ENABLE_PROFILER=1
+RUN npm install --only=production
 
-# libstdc++ → the C++ standard library (RUNTIME version of g++)
-# WHY: Stage 1 used g++ to COMPILE C++ extensions inside packages like grpcio.
-# Those compiled extensions (.so files) still need libstdc++ to RUN —
-# even though they don't need g++ itself anymore.
-# This is the runtime vs build-time dependency distinction:
-#   g++        → needed to compile  (build stage only)
-#   libstdc++  → needed to execute  (runtime stage)
-RUN apk update \
-    && apk add --no-cache libstdc++ \
-    && rm -rf /var/cache/apk/*
+FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 
-WORKDIR /email_server
+RUN apk add --no-cache nodejs
 
-# This is the KEY line — instead of copying node_modules (Node) or a binary (Go),
-# Python copies its entire site-packages directory across from the builder.
-# site-packages is where pip installs everything — it's Python's equivalent of node_modules.
-# We get all the installed packages without bringing along the compiler that built them.
-COPY --from=builder /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
+WORKDIR /usr/src/app
+
+COPY --from=builder /usr/src/app/node_modules ./node_modules
 
 COPY . .
 
-EXPOSE 8080
+EXPOSE 50051
 
-# Python IS the runtime here (like Node) — unlike Go where the binary runs standalone.
-# The interpreter (python) is already in the base image, so we just point it at our script.
-ENTRYPOINT [ "python", "email_server.py" ]
+ENTRYPOINT [ "node", "index.js" ]

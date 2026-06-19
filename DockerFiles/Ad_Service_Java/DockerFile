@@ -1,0 +1,91 @@
+# ─── STAGE 1: BUILDER ──────────────────────────────────────────────────────────
+ARG BUILDPLATFORM=linux/amd64
+
+# eclipse-temurin = the most widely used OpenJDK distribution (by Adoptium/Eclipse foundation)
+# "24.0.2_12" = JDK version 24, update 2, build 12
+# "jdk" = full Java Development Kit — compiler (javac) + runtime. Needed to BUILD.
+# "noble" = Ubuntu 24.04 base (same as C# builder stage)
+# JDK vs JRE is Java's equivalent of .NET's sdk vs runtime:
+#   JDK → compile + run (build stage only)
+#   JRE → run only (final stage)
+FROM --platform=$BUILDPLATFORM eclipse-temurin:24.0.2_12-jdk-noble@sha256:dacac8e9a0df0d2bd24e702b4431132875c249930b70555ebd7ca285b5bee684 AS builder
+
+WORKDIR /app
+
+# Gradle is Java's build tool (like npm for Node, but handles compile + test + package).
+# gradlew = "Gradle Wrapper" — a shell script that downloads and runs the correct
+# Gradle version automatically. You don't need Gradle installed on the machine.
+# Equivalent of having a pinned npm version per project.
+#
+# build.gradle = project manifest + build instructions (like package.json but also
+# describes HOW to compile, not just what dependencies to use)
+#
+# Copying build.gradle + gradlew BEFORE source code = same layer caching pattern.
+# Dependency downloads are slow (can be hundreds of MBs of JARs) — cache them
+# separately so source code changes don't re-trigger a full dependency download.
+COPY ["build.gradle", "gradlew", "./"]
+
+# Gradle wrapper needs this directory — it contains the wrapper config that tells
+# gradlew exactly which Gradle version to download.
+COPY gradle gradle
+
+# gradlew is a shell script — it arrives without execute permission from COPY.
+# Must chmod before you can run it. (You'd hit "Permission denied" without this.)
+RUN chmod +x gradlew
+
+# Custom Gradle task defined in build.gradle — pre-downloads all dependency JARs
+# into the local Gradle cache inside the image layer.
+# WHY a separate step before copying source: if only source changes, Docker reuses
+# this cached layer and skips re-downloading all dependencies. Same principle as
+# `npm install` before `COPY . .` in the Node Dockerfile.
+RUN ./gradlew downloadRepos
+
+COPY . .
+
+# chmod again after COPY . . because the full source copy can overwrite gradlew
+# with a version that again lacks execute permission (depending on git/filesystem settings)
+RUN chmod +x gradlew
+
+# "installDist" = Gradle task that compiles the code and produces a runnable
+# distribution in build/install/<appname>/:
+#   bin/AdService       → shell script that launches the app (sets classpath, JVM flags)
+#   lib/*.jar           → compiled app JAR + all dependency JARs
+# This is Java's equivalent of "dotnet publish" or "go build" — produces the
+# final runnable artifact. Unlike Go/C#, it's NOT a single binary — it's a
+# folder with a launcher script + a lib/ directory of JARs.
+RUN ./gradlew installDist
+
+
+# ─── STAGE 2: FINAL / RUNTIME IMAGE ───────────────────────────────────────────
+# JRE only — no compiler, no build tools, just the runtime needed to execute JARs.
+# "alpine" base (vs "noble"/Ubuntu in builder) — smaller final image.
+# "25.0.2_10" — note this is a NEWER Java version than the builder (24 → 25).
+# Java is forwards-compatible for running: JARs compiled on Java 24 run fine on 25.
+# This is intentional — get security patches in the runtime without recompiling.
+FROM eclipse-temurin:25.0.2_10-jre-alpine@sha256:5fcc27581b238efbfda93da3a103f59e0b5691fe522a7ac03fe8057b0819c888
+
+# Commented-out block = GCP Stackdriver Profiler agent setup.
+# Would download a Java agent JAR that attaches to the JVM and sends profiling
+# data to Google Cloud. Disabled (linked issue suggests it's broken/deprecated).
+# Leaving it as a comment is common practice — documents intent without breaking the build.
+# @TODO: https://github.com/GoogleCloudPlatform/microservices-demo/issues/2517
+
+WORKDIR /app
+
+# Copy the ENTIRE /app directory from builder — which includes:
+#   build/install/hipstershop/bin/AdService   → the launcher shell script
+#   build/install/hipstershop/lib/*.jar       → app + all dependency JARs
+# Unlike Go/C# (single binary), Java ships as a folder. The JRE in this image
+# is what actually executes the JARs — Java is NOT self-contained by default.
+COPY --from=builder /app .
+
+EXPOSE 9555
+
+# The entrypoint is the generated shell SCRIPT (bin/AdService), not a JAR directly.
+# Gradle's installDist generates this script with the correct:
+#   - java command path
+#   - classpath (all the JARs in lib/)
+#   - JVM flags
+# Running `java -jar` directly would require you to manually specify the classpath.
+# The generated script handles all of that — cleaner and less error-prone.
+ENTRYPOINT ["/app/build/install/hipstershop/bin/AdService"]

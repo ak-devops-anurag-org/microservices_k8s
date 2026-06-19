@@ -1,0 +1,120 @@
+services:
+
+  adservice:
+    image: akdevanurag/k8s_demo:adservice
+    container_name: adservice
+    restart: unless-stopped
+    ports:
+      - "9555:9555"
+
+  cartservice:
+    image: akdevanurag/k8s_demo:cartservice
+    container_name: cartservice
+    restart: unless-stopped
+    ports:
+      - "7070:7070"
+
+  currencyservice:
+    image: akdevanurag/k8s_demo:currencyservice
+    container_name: currencyservice
+    restart: unless-stopped
+    environment:
+      PORT: "7000"
+    ports:
+      - "7000:7000"
+
+  productcatalogservice:
+    image: akdevanurag/k8s_demo:productcatalogservice
+    container_name: productcatalogservice
+    restart: unless-stopped
+    ports:
+      - "3550:3550"
+
+  shippingservice:
+    image: akdevanurag/k8s_demo:shippingservice
+    container_name: shippingservice
+    restart: unless-stopped
+    ports:
+      - "50051:50051"
+
+  paymentservice:
+    image: akdevanurag/k8s_demo:paymentservice
+    container_name: paymentservice
+    restart: unless-stopped
+    environment:
+      PORT: "50051"
+      DISABLE_PROFILER: "1"
+    ports:
+      - "50052:50051"
+
+  emailservice:
+    image: akdevanurag/k8s_demo:emailservice
+    container_name: emailservice
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+
+  recommendationservice:
+    image: akdevanurag/k8s_demo:recommendationservice
+    container_name: recommendationservice
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+    depends_on:
+      - productcatalogservice
+    ports:
+      - "8081:8080"
+
+  checkoutservice:
+    image: akdevanurag/k8s_demo:checkoutservice
+    container_name: checkoutservice
+    restart: unless-stopped
+    environment:
+      PORT: "5050"
+      PRODUCT_CATALOG_SERVICE_ADDR: "productcatalogservice:3550"
+      SHIPPING_SERVICE_ADDR: "shippingservice:50051"
+      PAYMENT_SERVICE_ADDR: "paymentservice:50051"
+      EMAIL_SERVICE_ADDR: "emailservice:8080"
+      CURRENCY_SERVICE_ADDR: "currencyservice:7000"
+      CART_SERVICE_ADDR: "cartservice:7070"
+    depends_on:
+      - productcatalogservice
+      - shippingservice
+      - paymentservice
+      - emailservice
+      - currencyservice
+      - cartservice
+    ports:
+      - "5050:5050"
+
+  frontend:
+    image: akdevanurag/k8s_demo:frontend
+    container_name: frontend
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      PRODUCT_CATALOG_SERVICE_ADDR: "productcatalogservice:3550"
+      CURRENCY_SERVICE_ADDR: "currencyservice:7000"
+      CART_SERVICE_ADDR: "cartservice:7070"
+      RECOMMENDATION_SERVICE_ADDR: "recommendationservice:8080"
+      SHIPPING_SERVICE_ADDR: "shippingservice:50051"
+      CHECKOUT_SERVICE_ADDR: "checkoutservice:5050"
+      AD_SERVICE_ADDR: "adservice:9555"
+      SHOPPING_ASSISTANT_SERVICE_ADDR: "shoppingassistantservice:80"
+    depends_on:
+      - adservice
+      - cartservice
+      - currencyservice
+      - productcatalogservice
+      - recommendationservice
+      - shippingservice
+      - paymentservice
+      - emailservice
+      - checkoutservice
+    ports:
+      - "8090:8080"
+
+networks:
+  default:
+    name: K8S_network
+    driver: bridge
